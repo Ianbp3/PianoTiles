@@ -675,6 +675,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 ### 📊 Flujo de Datos en Tiempo Real
 
+> Ya habiendo repasado los diferentes componentes del proyecto será más fácil comprender su flujo de datos y cómo trabaja cada interacción.
+
 ```
 [User Keypress] → [GLFW] → [keyCallback] → [activeNotes + mutex] 
                                                ↓
@@ -688,12 +690,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 - `std::atomic<float>`: VU meters thread-safe sin bloquear audio
 - Lock-free en audio callback: Solo lee atomics, minimiza `mutex` time
 
-## 📝 Notas de Desarrollo
-
-Este proyecto fue desarrollado con énfasis en:
-- **Real-time safety**: Mínimas allocaciones en audio thread
-- **Cross-platform**: CMake + FetchContent para portabilidad
-- **Low-latency**: Optimizaciones específicas para audio interactivo
-- **Educational value**: Código claro para aprender síntesis de audio
-
-**Contribuciones bienvenidas** - especialmente para migración a OpenGL moderno y soporte MIDI.
+## Disfruten de su Piano Virtual 🎹 
