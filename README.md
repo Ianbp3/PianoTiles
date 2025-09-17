@@ -1,4 +1,3 @@
-```markdown
 # Piano Virtual (C++ · GLFW · RtAudio)
 
 Proyecto de **síntesis en tiempo real** que implementa un piano virtual controlado con el teclado QWERTY.  
