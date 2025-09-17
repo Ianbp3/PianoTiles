@@ -1,14 +1,24 @@
+#include "VirtualPiano.hpp"
+
 #if defined(__SSE__)
   #include <xmmintrin.h>
   #include <pmmintrin.h>
 #endif
-#include <vector>
-#include "VirtualPiano.hpp"
-#include <cstdio>
-#include <cmath>
-#include <algorithm>
 
-static void drawRect(float x, float y, float w, float h, bool filled=true) {
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+// Constantes portables (evita depender de M_PI)
+namespace dspc {
+    constexpr double PI     = 3.14159265358979323846;
+    constexpr double TWO_PI = 6.28318530717958647692;
+}
+
+// -----------------------------------------------------------
+// Helpers de dibujo (OpenGL fijo)
+static void drawRect(float x, float y, float w, float h, bool filled = true) {
     if (filled) glBegin(GL_QUADS);
     else        glBegin(GL_LINE_LOOP);
     glVertex2f(x, y);
@@ -18,7 +28,21 @@ static void drawRect(float x, float y, float w, float h, bool filled=true) {
     glEnd();
 }
 
+// Lectura del delay con interpolación lineal
+static inline float delayReadLinear(const std::vector<float>& buf,
+                                    int writeIdx, float delaySamps) {
+    const int N = (int)buf.size();
+    float rIndex = (float)writeIdx - delaySamps;
+    while (rIndex < 0.0f) rIndex += (float)N;
+    int i0 = (int)rIndex;
+    int i1 = (i0 + 1) % N;
+    float frac = rIndex - (float)i0;
+    return buf[i0] + (buf[i1] - buf[i0]) * frac;
+}
+// -----------------------------------------------------------
+
 bool VirtualPiano::initialize() {
+    // --- Ventana / GLFW ---
     if (!glfwInit()) {
         std::fprintf(stderr, "GLFW init failed\n");
         return false;
@@ -34,11 +58,13 @@ bool VirtualPiano::initialize() {
     glfwSetKeyCallback(window, &VirtualPiano::s_keyCallback);
     glfwSwapInterval(1);
 
+    // --- Evitar denormals (reduce pops por picos de CPU) ---
     #if defined(__SSE__)
       _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
       _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
     #endif
 
+    // --- Audio / RtAudio ---
     std::vector<RtAudio::Api> apis;
     RtAudio::getCompiledApi(apis);
 
@@ -57,12 +83,12 @@ bool VirtualPiano::initialize() {
 
     RtAudio::StreamParameters oParams;
     oParams.deviceId = audio->getDefaultOutputDevice();
-    oParams.nChannels = params.channels;
+    oParams.nChannels = params.channels;   // 2
     oParams.firstChannel = 0;
 
     RtAudio::StreamOptions options;
     options.streamName = "PianoVirtual";
-    options.numberOfBuffers = 2;
+    options.numberOfBuffers = 2; // <20ms con 512 frames (~11.6ms * 2 ≈ 23ms cola teórica)
     options.flags = RTAUDIO_MINIMIZE_LATENCY | RTAUDIO_SCHEDULE_REALTIME;
 
     RtAudioFormat fmt = RTAUDIO_FLOAT32;
@@ -83,7 +109,8 @@ bool VirtualPiano::initialize() {
 
     setupKeymap();
 
-    size_t delaySamples = static_cast<size_t>(params.sampleRate * 0.02);
+    // Buffer de delay para chorus (~40 ms: base ~18 ms + depth ~6 ms con margen)
+    size_t delaySamples = static_cast<size_t>(params.sampleRate * 0.040);
     delayL.assign(delaySamples, 0.0f);
     delayR.assign(delaySamples, 0.0f);
     delayIdx = 0;
@@ -93,18 +120,18 @@ bool VirtualPiano::initialize() {
 
 void VirtualPiano::setupKeymap() {
     keyToFreqBase = {
-        {GLFW_KEY_A, 261.63}, 
-        {GLFW_KEY_W, 277.18}, 
-        {GLFW_KEY_S, 293.66}, 
-        {GLFW_KEY_E, 311.13}, 
-        {GLFW_KEY_D, 329.63}, 
-        {GLFW_KEY_F, 349.23}, 
-        {GLFW_KEY_T, 369.99}, 
-        {GLFW_KEY_G, 392.00}, 
-        {GLFW_KEY_Y, 415.30}, 
-        {GLFW_KEY_H, 440.00}, 
-        {GLFW_KEY_U, 466.16}, 
-        {GLFW_KEY_J, 493.88}  
+        {GLFW_KEY_A, 261.63}, // C4
+        {GLFW_KEY_W, 277.18}, // C#4
+        {GLFW_KEY_S, 293.66}, // D4
+        {GLFW_KEY_E, 311.13}, // D#4
+        {GLFW_KEY_D, 329.63}, // E4
+        {GLFW_KEY_F, 349.23}, // F4
+        {GLFW_KEY_T, 369.99}, // F#4
+        {GLFW_KEY_G, 392.00}, // G4
+        {GLFW_KEY_Y, 415.30}, // G#4
+        {GLFW_KEY_H, 440.00}, // A4
+        {GLFW_KEY_U, 466.16}, // A#4
+        {GLFW_KEY_J, 493.88}  // B4
     };
 }
 
@@ -128,6 +155,8 @@ void VirtualPiano::cleanup() {
     glfwTerminate();
 }
 
+// -----------------------------------------------------------
+// Input
 void VirtualPiano::s_keyCallback(GLFWwindow* w, int key, int sc, int action, int mods) {
     auto* self = static_cast<VirtualPiano*>(glfwGetWindowUserPointer(w));
     if (self) self->keyCallback(key, action);
@@ -139,25 +168,30 @@ void VirtualPiano::keyCallback(int key, int action) {
             glfwSetWindowShouldClose(window, 1);
             return;
         }
-        if (key == GLFW_KEY_RIGHT) {
+        // Volumen (+ / - / ← / →)
+        if (key == GLFW_KEY_RIGHT || key == GLFW_KEY_KP_ADD || key == GLFW_KEY_EQUAL) {
             params.masterGain = std::min(1.0, params.masterGain + 0.05);
             return;
         }
-        if (key == GLFW_KEY_LEFT) {
+        if (key == GLFW_KEY_LEFT || key == GLFW_KEY_KP_SUBTRACT || key == GLFW_KEY_MINUS) {
             params.masterGain = std::max(0.0, params.masterGain - 0.05);
             return;
         }
 
+        // Octava
         if (key == GLFW_KEY_UP)   { params.octaveOffset = std::min(3,  params.octaveOffset + 1); return; }
         if (key == GLFW_KEY_DOWN) { params.octaveOffset = std::max(-3, params.octaveOffset - 1); return; }
 
+        // Forma de onda
         if (key == GLFW_KEY_1) { params.waveform = Waveform::Sine;     return; }
         if (key == GLFW_KEY_2) { params.waveform = Waveform::Square;   return; }
         if (key == GLFW_KEY_3) { params.waveform = Waveform::Triangle; return; }
         if (key == GLFW_KEY_4) { params.waveform = Waveform::Saw;      return; }
 
+        // Chorus ON/OFF
         if (key == GLFW_KEY_C) { params.chorus = !params.chorus; return; }
 
+        // NOTE ON
         auto it = keyToFreqBase.find(key);
         if (it != keyToFreqBase.end()) {
             std::lock_guard<std::mutex> lock(mtx);
@@ -170,9 +204,10 @@ void VirtualPiano::keyCallback(int key, int action) {
             double freq = it->second * std::pow(2.0, params.octaveOffset);
             n.setFrequency(freq, params.sampleRate);
             n.wave = params.waveform;
-            n.amplitude = 0.5;  
+            n.amplitude = 0.5; // nivel por nota
         }
     } else if (action == GLFW_RELEASE) {
+        // NOTE OFF
         auto it = keyToFreqBase.find(key);
         if (it != keyToFreqBase.end()) {
             std::lock_guard<std::mutex> lock(mtx);
@@ -184,8 +219,9 @@ void VirtualPiano::keyCallback(int key, int action) {
         }
     }
 }
+// -----------------------------------------------------------
 
-
+// Audio callback (trampolín)
 int VirtualPiano::s_audioCallback(void* outputBuffer, void* inputBuffer,
                                   unsigned int nBufferFrames, double /*streamTime*/,
                                   RtAudioStreamStatus status, void* userData) {
@@ -193,53 +229,132 @@ int VirtualPiano::s_audioCallback(void* outputBuffer, void* inputBuffer,
     auto* self = static_cast<VirtualPiano*>(userData);
     return self->audioCallback(static_cast<float*>(outputBuffer), nBufferFrames);
 }
+
+// Motor de audio
 int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
+    // Limpiar salida
     std::fill(out, out + nFrames * params.channels, 0.0f);
 
+    // Bloqueo una sola vez por callback (evita carreras con la UI)
     std::lock_guard<std::mutex> lock(mtx);
 
-    double rmsAcc = 0.0;
+    double rmsAcc  = 0.0;
     double peakAbs = 0.0;
 
-    for (unsigned int i = 0; i < nFrames; ++i) {
-        double mix = 0.0;
-        for (auto& kv : activeNotes) {
-            Note& n = kv.second;
-            if (!n.alive) continue;
-            mix += n.nextSample(params.sampleRate);
+    const bool useChorus = (params.chorus && params.channels >= 2 && !delayL.empty());
+
+    if (useChorus) {
+        // LFO dual estéreo (mantener entre callbacks)
+        static double lfoPhL = 0.0, lfoPhR = 0.0;
+        static double lfoIncL = 0.0, lfoIncR = 0.0;
+        static bool   lfoInit = false;
+        if (!lfoInit) {
+            const double fL = 0.80, fR = 1.20; // Hz
+            lfoIncL = dspc::TWO_PI * fL / params.sampleRate;
+            lfoIncR = dspc::TWO_PI * fR / params.sampleRate;
+            lfoInit = true;
         }
 
-        mix *= params.masterGain;
+        // Parámetros del chorus
+        const float baseMs  = 18.0f;  // retardo base
+        const float depthMs =  6.0f;  // modulación ±
+        const float wet     =  0.35f; // mezcla húmeda
+        const float dry     =  1.0f - wet;
 
-        const double thr  = 0.90;  
-        const double knee = 0.10;  
-        double a = std::fabs(mix);
-        if (a > thr) {
-            double t = std::min(1.0, (a - thr) / knee);   
-            double comp = thr + knee * (t - (t*t*t)/3.0);
-            mix = (mix < 0.0 ? -comp : comp);
+        const float baseS  = (float)(params.sampleRate * (baseMs  / 1000.0f));
+        const float depthS = (float)(params.sampleRate * (depthMs / 1000.0f));
+        const int   N      = (int)delayL.size();
+
+        for (unsigned int i = 0; i < nFrames; ++i) {
+            // Mezcla de voces
+            double mix = 0.0;
+            for (auto& kv : activeNotes) {
+                Note& n = kv.second;
+                if (!n.alive) continue;
+                mix += n.nextSample(params.sampleRate);
+            }
+            mix *= params.masterGain;
+
+            // Soft-knee cercano a 0 dB (evita clip duro)
+            const double thr  = 0.90;
+            const double knee = 0.10;
+            double a = std::fabs(mix);
+            if (a > thr) {
+                double t = std::min(1.0, (a - thr) / knee);
+                double comp = thr + knee * (t - (t*t*t)/3.0);
+                mix = (mix < 0.0 ? -comp : comp);
+            }
+            if (mix > 1.0) mix = 1.0;
+            else if (mix < -1.0) mix = -1.0;
+
+            // Chorus: escribir en delay y leer offsets modulados
+            float in = (float)mix;
+            delayL[delayIdx] = in;
+            delayR[delayIdx] = in;
+
+            float dL = baseS + depthS * (float)std::sin(lfoPhL);
+            float dR = baseS + depthS * (float)std::sin(lfoPhR);
+
+            float wetL = delayReadLinear(delayL, (int)delayIdx, dL);
+            float wetR = delayReadLinear(delayR, (int)delayIdx, dR);
+
+            float outL = dry * in + wet * wetL;
+            float outR = dry * in + wet * wetR;
+
+            out[2 * i + 0] = outL;
+            out[2 * i + 1] = outR;
+
+            // Avance writeIdx y fases de LFO
+            delayIdx = (delayIdx + 1) % (size_t)N;
+            lfoPhL += lfoIncL; if (lfoPhL >= dspc::TWO_PI) lfoPhL -= dspc::TWO_PI;
+            lfoPhR += lfoIncR; if (lfoPhR >= dspc::TWO_PI) lfoPhR -= dspc::TWO_PI;
+
+            // Métricas VU
+            double aa = (mix >= 0.0) ? mix : -mix;
+            if (aa > peakAbs) peakAbs = aa;
+            rmsAcc += mix * mix;
         }
-        if (mix > 1.0) mix = 1.0;
-        else if (mix < -1.0) mix = -1.0;
+    } else {
+        // Camino sin chorus
+        for (unsigned int i = 0; i < nFrames; ++i) {
+            double mix = 0.0;
+            for (auto& kv : activeNotes) {
+                Note& n = kv.second;
+                if (!n.alive) continue;
+                mix += n.nextSample(params.sampleRate);
+            }
+            mix *= params.masterGain;
 
-        float s = static_cast<float>(mix);
-        out[params.channels * i + 0] = s;
-        if (params.channels > 1) out[params.channels * i + 1] = s;
+            const double thr  = 0.90;
+            const double knee = 0.10;
+            double a = std::fabs(mix);
+            if (a > thr) {
+                double t = std::min(1.0, (a - thr) / knee);
+                double comp = thr + knee * (t - (t*t*t)/3.0);
+                mix = (mix < 0.0 ? -comp : comp);
+            }
+            if (mix > 1.0) mix = 1.0;
+            else if (mix < -1.0) mix = -1.0;
 
-        double aa = (mix >= 0.0) ? mix : -mix;
-        if (aa > peakAbs) peakAbs = aa;
-        rmsAcc += mix * mix;
+            float s = static_cast<float>(mix);
+            out[params.channels * i + 0] = s;
+            if (params.channels > 1) out[params.channels * i + 1] = s;
+
+            double aa = (mix >= 0.0) ? mix : -mix;
+            if (aa > peakAbs) peakAbs = aa;
+            rmsAcc += mix * mix;
+        }
     }
 
+    // Publicar VU (0..1)
     float rms = static_cast<float>(std::sqrt(rmsAcc / std::max(1u, nFrames)));
     if (rms < 0.0f) rms = 0.0f; else if (rms > 1.0f) rms = 1.0f;
-
     float pk = static_cast<float>(peakAbs);
     if (pk < 0.0f) pk = 0.0f; else if (pk > 1.0f) pk = 1.0f;
-
     meterRms.store(rms, std::memory_order_relaxed);
     meterPeak.store(pk, std::memory_order_relaxed);
 
+    // Retirar notas que ya terminaron su release
     std::vector<int> toErase;
     toErase.reserve(activeNotes.size());
     for (auto& kv : activeNotes) {
@@ -251,8 +366,10 @@ int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
     return 0;
 }
 
+// -----------------------------------------------------------
+// UI
 void VirtualPiano::drawUI() {
-    int w, h; 
+    int w, h;
     glfwGetFramebufferSize(window, &w, &h);
     glViewport(0, 0, w, h);
     glMatrixMode(GL_PROJECTION);
@@ -266,13 +383,16 @@ void VirtualPiano::drawUI() {
 
     drawKeyboard(w, h);
 
+    // Barra de volumen
     glColor3f(0.2f, 0.8f, 0.4f);
     drawRect(20, 20, (float)(params.masterGain * (w - 40)), 12, true);
-    glColor3f(1,1,1);
+    glColor3f(1, 1, 1);
     drawRect(20, 20, (float)(w - 40), 12, false);
 
+    // VU
     drawMeters(w, h);
 
+    // Log liviano
     static double lastPrint = 0.0;
     double now = glfwGetTime();
     if (now - lastPrint > 1.5) {
@@ -292,39 +412,45 @@ void VirtualPiano::drawKeyboard(int width, int height) {
     float whiteW = (width - 80.0f) / 7.0f;
     float whiteH = height - y0 - 40.0f;
 
-    int whites[7] = { GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D, GLFW_KEY_F, GLFW_KEY_G, GLFW_KEY_H, GLFW_KEY_J };
-    for (int i = 0; i < 7; ++i) {
-        int key = whites[i];
-        bool on = false;
-        { std::lock_guard<std::mutex> lock(mtx);
-          auto it = activeNotes.find(key);
-          on = (it != activeNotes.end() && it->second.pressed);
+    // Snapshot de teclas presionadas (un solo lock)
+    bool wOn[7]  = {false,false,false,false,false,false,false};
+    bool bOn[5]  = {false,false,false,false,false};
+    const int whites[7] = { GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D, GLFW_KEY_F, GLFW_KEY_G, GLFW_KEY_H, GLFW_KEY_J };
+    struct BK { int key; int posIndex; };
+    const BK blacks[5] = {
+        {GLFW_KEY_W, 0}, {GLFW_KEY_E, 1}, {GLFW_KEY_T, 3}, {GLFW_KEY_Y, 4}, {GLFW_KEY_U, 5}
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (int i = 0; i < 7; ++i) {
+            auto it = activeNotes.find(whites[i]);
+            wOn[i] = (it != activeNotes.end() && it->second.pressed);
         }
+        for (int i = 0; i < 5; ++i) {
+            auto it = activeNotes.find(blacks[i].key);
+            bOn[i] = (it != activeNotes.end() && it->second.pressed);
+        }
+    } // desbloqueado aquí
+
+    // Dibujar teclas blancas
+    for (int i = 0; i < 7; ++i) {
+        bool on = wOn[i];
         glColor3f(on ? 0.9f : 0.95f, on ? 0.9f : 0.95f, on ? 0.3f : 0.95f);
         drawRect(x0 + i * whiteW, y0, whiteW - 2.0f, whiteH, true);
-        glColor3f(0,0,0);
+        glColor3f(0, 0, 0);
         drawRect(x0 + i * whiteW, y0, whiteW - 2.0f, whiteH, false);
     }
 
+    // Dimensiones de negras
     float blackW = whiteW * 0.6f;
     float blackH = whiteH * 0.6f;
-    struct BK { int key; int posIndex; };
-    BK blacks[] = {
-        {GLFW_KEY_W, 0}, 
-        {GLFW_KEY_E, 1}, 
-        {GLFW_KEY_T, 3}, 
-        {GLFW_KEY_Y, 4}, 
-        {GLFW_KEY_U, 5}  
-    };
-    for (auto& b : blacks) {
-        int i = b.posIndex;
+
+    for (int idx = 0; idx < 5; ++idx) {
+        int i = blacks[idx].posIndex;
         float bx = x0 + (i + 1) * whiteW - blackW * 0.5f;
         float by = y0;
-        bool on = false;
-        { std::lock_guard<std::mutex> lock(mtx);
-          auto it = activeNotes.find(b.key);
-          on = (it != activeNotes.end() && it->second.pressed);
-        }
+        bool on = bOn[idx];
         if (on) glColor3f(0.1f, 0.1f, 0.1f);
         else     glColor3f(0.02f, 0.02f, 0.02f);
         drawRect(bx, by, blackW, blackH, true);
@@ -344,26 +470,29 @@ void VirtualPiano::drawMeters(int width, int height) {
     const float x    = (float)width - 40.f;
     const float y    = 60.f;
 
+    // Fondo
     glColor3f(0.15f, 0.15f, 0.18f);
     drawRect(x, y, barW, barH, true);
-    glColor3f(0,0,0);
+    glColor3f(0, 0, 0);
     drawRect(x, y, barW, barH, false);
 
     auto setColor = [](float v){
-        if (v >= 0.90f) glColor3f(0.95f, 0.30f, 0.30f);   
-        else if (v >= 0.70f) glColor3f(0.95f, 0.80f, 0.30f);
-        else glColor3f(0.30f, 0.85f, 0.40f); 
+        if (v >= 0.90f) glColor3f(0.95f, 0.30f, 0.30f);     // rojo
+        else if (v >= 0.70f) glColor3f(0.95f, 0.80f, 0.30f);// amarillo
+        else glColor3f(0.30f, 0.85f, 0.40f);                // verde
     };
 
+    // RMS (izquierda)
     float rmsH = barH * rms;
     setColor(rms);
     drawRect(x + 2.f, y + (barH - rmsH), (barW * 0.5f) - 3.f, rmsH, true);
 
+    // Peak (derecha)
     float pkH = barH * peak;
     setColor(peak);
     drawRect(x + (barW * 0.5f) + 1.f, y + (barH - pkH), (barW * 0.5f) - 3.f, pkH, true);
 
-    glColor3f(0,0,0);
+    // Separador
+    glColor3f(0, 0, 0);
     drawRect(x + (barW * 0.5f), y + 2.f, 1.f, barH - 4.f, true);
 }
-

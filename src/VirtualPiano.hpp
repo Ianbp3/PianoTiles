@@ -24,7 +24,7 @@ struct SynthParams {
     double sampleRate = 44100.0;
     unsigned int bufferFrames = 512;
     unsigned int channels = 2;
-    double masterGain = 0.3;
+    double masterGain = 0.5;
     int    octaveOffset = 0;
     Waveform waveform = Waveform::Sine;
     bool   chorus = false;
@@ -61,6 +61,5 @@ private:
 
     void drawUI();
     void drawKeyboard(int width, int height);
-    void drawText(int x, int y, const std::string& text);
     void drawMeters(int width, int height);
 };
