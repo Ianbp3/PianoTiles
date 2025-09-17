@@ -132,7 +132,7 @@ cmake --build . -j
 **Octava:** `↑` / `↓`  
 **Forma de onda:** `1` Sine, `2` Square, `3` Triangle, `4` Saw  
 **Salir:** `ESC`  
-**(Reserva)** Chorus `C` (activación para futuro extra).
+**Chorus:** `C` (activación para futuro extra).
 
 > El **VU** se muestra como dos barras verticales en el borde derecho: **RMS** (izquierda) y **Peak** (derecha).
 
@@ -145,7 +145,6 @@ cmake --build . -j
   - Se persigue **< 20 ms**: se usa **doble buffer** y flags de baja latencia en RtAudio.
 - **Flags de RtAudio** (en el código):  
   `RTAUDIO_MINIMIZE_LATENCY | RTAUDIO_SCHEDULE_REALTIME`.
-- **WSLg/Pulse**: si escuchas “pops”, lanza con `PULSE_LATENCY_MSEC=20` (no cambia SR ni buffer; ajusta el cliente Pulse).
 
 ---
 
