@@ -4,8 +4,6 @@ Proyecto de **síntesis en tiempo real** que implementa un piano virtual control
 Renderiza una interfaz sencilla con **GLFW/OpenGL** y genera audio con **RtAudio**.  
 Características fijas: **44.1 kHz**, **buffer de 512 frames**, **latencia baja (< 20 ms con doble buffer)**, **estéreo**, **float32**, polifonía, **envolvente ADSR**, formas de onda, control de volumen y salida con `ESC`.
 
-> Más adelante integraremos aquí la **descripción de diseño y arquitectura** por archivo (cuando vayamos sección por sección).
-
 ---
 
 ## Características
@@ -183,27 +181,6 @@ sudo apt install -y libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 **Pops / clics ocasionales**  
 - Observa si aparecen mensajes `[XRUN]` (underruns).  
 - Cierra aplicaciones pesadas, evita `printf` frecuentes.  
-- Prueba `PULSE_LATENCY_MSEC=20` o `30` en WSLg.
 
 **Windows no compila audio**  
 - Activa **WASAPI** en CMake y no fuerces APIs de Linux en el código.
-
----
-
-## Próximos pasos (diseño / arquitectura)
-
-- Diagrama de bloques (UI, motor de audio, sincronización).  
-- Descripción de **`Note.hpp`** (oscilador + ADSR), **`VirtualPiano`** (callback, mixer, UI), modelo de **threading** y acceso concurrente.  
-- Decisiones: **soft-knee**, normalización por forma, flags de latencia, elección de backend según plataforma, tips WSLg.  
-- Extensiones: **chorus**, delay, reverb, VU con peak-hold.
-
----
-
-## Licencia
-Uso académico. (Ajusta aquí la licencia según requiera tu curso o tus preferencias.)
-
----
-
-## Agradecimientos
-- **RtAudio** — Gary P. Scavone & colaboradores  
-- **GLFW** — Marcus Geelnard, Camilla Löwy & contrib.
