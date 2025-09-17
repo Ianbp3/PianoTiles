@@ -2,7 +2,7 @@
 
 Proyecto de **síntesis en tiempo real** que implementa un piano virtual controlado con el teclado QWERTY.  
 Renderiza una interfaz sencilla con **GLFW/OpenGL** y genera audio con **RtAudio**.  
-Cumple con los requisitos del enunciado: **44.1 kHz**, **buffer de 512 frames**, **latencia baja (< 20 ms con doble buffer)**, **estéreo**, **float32**, polifonía, **envolvente ADSR**, formas de onda, control de volumen y salida con `ESC`.
+Características fijas: **44.1 kHz**, **buffer de 512 frames**, **latencia baja (< 20 ms con doble buffer)**, **estéreo**, **float32**, polifonía, **envolvente ADSR**, formas de onda, control de volumen y salida con `ESC`.
 
 > Más adelante integraremos aquí la **descripción de diseño y arquitectura** por archivo (cuando vayamos sección por sección).
 
