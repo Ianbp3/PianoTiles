@@ -1,6 +1,6 @@
 # Piano Virtual (C++ · GLFW · RtAudio)
 
-Un **sintetizador de piano virtual en tiempo real** que permite tocar música usando el teclado QWERTY de tu computadora. Implementado en C++ con renderizado OpenGL (GLFW) y síntesis de audio de baja latencia (RtAudio).
+Un sintetizador de piano virtual en tiempo real que permite tocar música usando el teclado QWERTY de la computadora. Implementado en C++ con renderizado OpenGL (GLFW) y síntesis de audio de baja latencia (RtAudio).
 
 ## 🎹 Características Principales
 
@@ -31,7 +31,7 @@ Notas:                        C#4 D#4   F#4 G#4 A#4
   - `2` - Square (8-bit)
   - `3` - Triangle (Cálido)  
   - `4` - Saw (Brillante)
-- **Chorus:** `C` (Efecto experimental - reservado para futuras versiones)
+- **Chorus:** `C` 
 - **Salir:** `ESC`
 
 ## 🏗️ Arquitectura y Decisiones de Diseño
@@ -124,13 +124,11 @@ cmake --build build --config Release -j
 # Verificar que PulseAudio está disponible
 echo $PULSE_SERVER  # Debe mostrar: unix:/mnt/wslg/PulseServer
 
-# Compilar normalmente
+# Compilar
 mkdir build && cd build
 cmake .. && make -j
 ./PianoTiles
 
-# Si hay audio crackling, ajustar latencia:
-PULSE_LATENCY_MSEC=30 ./PianoTiles
 ```
 
 ## 🔧 Solución de Problemas
@@ -196,20 +194,6 @@ sudo apt install -y libx11-dev libxrandr-dev libxinerama-dev
 | Latency Target | < 20ms | Percepción humana de "instantáneo" |
 | Polyphony | Unlimited* | *Limitado por CPU (~20-50 voces típico |
 
-## 🛠️ Problemas Conocidos y Limitaciones
-
-### Issues Actuales
-1. **macOS Compatibility**: OpenGL legacy deprecated en macOS 10.14+
-2. **JACK Support**: Requiere parche manual en RtAudio (incluido)
-3. **Memory Usage**: Sin pool de objetos Note (creación/destrucción dinámica)
-
-### Futuras Mejoras
-- [ ] Migrar a OpenGL 3.3+ Core Profile
-- [ ] Implementar efectos DSP (reverb, delay, chorus)
-- [ ] Soporte MIDI input/output
-- [ ] Preset system para timbres
-- [ ] Recording/playback functionality
-
 ## 🧬 Estructura del Código y Explicación de Archivos
 
 ```
@@ -247,32 +231,36 @@ int main() {
 
 ---
 
-#### **`src/VirtualPiano.hpp`** (53 líneas)
+#### **`src/VirtualPiano.hpp`**
 **Imports y Configuración:**
 ```cpp
-#ifndef GLFW_INCLUDE_NONE            // Evitar inclusión automática de OpenGL
+#ifndef GLFW_INCLUDE_NONE            
 #define GLFW_INCLUDE_NONE
 #endif
 
-#if defined(__APPLE__)               // Headers OpenGL multiplataforma
+#if defined(__APPLE__)               
   #include <OpenGL/gl.h>
 #else
   #include <GL/gl.h>
 #endif
 ```
 
+> Headers adaptados por multiplataforma.
+
 **Estructura Principal:**
 ```cpp
-struct SynthParams {                 // Configuración global del sintetizador
-    double sampleRate = 44100.0;     // Frecuencia de muestreo fija
-    unsigned int bufferFrames = 512;  // Tamaño de buffer (latencia)
-    unsigned int channels = 2;        // Estéreo
-    double masterGain = 0.3;          // Volumen principal (30%)
-    int    octaveOffset = 0;          // Transposición de octavas
-    Waveform waveform = Waveform::Sine; // Forma de onda actual
-    bool   chorus = false;            // Flag para futuro efecto chorus
+struct SynthParams {                 
+    double sampleRate = 44100.0;     
+    unsigned int bufferFrames = 512;  
+    unsigned int channels = 2;        
+    double masterGain = 0.3;          
+    int    octaveOffset = 0;          
+    Waveform waveform = Waveform::Sine; 
+    bool   chorus = false;            
 };
 ```
+
+> Acá se determina la configuración global del sintetizador. Esto facilita las pruebas que se quieran realizar ya que cualquier cambio general rápido se puede realizar desde en esta sección del código.
 
 **Clase VirtualPiano:**
 - **Miembros privados**: `window` (GLFW), `audio` (RtAudio), `params`, `keyToFreqBase` (mapeo teclas), `activeNotes` (notas sonando)
@@ -283,18 +271,19 @@ struct SynthParams {                 // Configuración global del sintetizador
 
 ---
 
-#### **`src/VirtualPiano.cpp`** (402 líneas) - **ARCHIVO PRINCIPAL**
+#### **`src/VirtualPiano.cpp`** - **ARCHIVO PRINCIPAL**
 
-**Sección 1: Optimizaciones SSE (líneas 1-8)**
+**Sección 1: Optimizaciones SSE **
 ```cpp
 #if defined(__SSE__)
   #include <xmmintrin.h>
   #include <pmmintrin.h>
 #endif
 ```
-Incluye headers para optimizaciones SIMD en arquitecturas x86.
 
-**Sección 2: Función auxiliar OpenGL (líneas 10-18)**
+> Incluye headers para optimizaciones SIMD en arquitecturas x86.
+
+**Sección 2: Función auxiliar OpenGL**
 ```cpp
 static void drawRect(float x, float y, float w, float h, bool filled=true) {
     if (filled) glBegin(GL_QUADS);    // OpenGL legacy mode
@@ -304,23 +293,20 @@ static void drawRect(float x, float y, float w, float h, bool filled=true) {
     glEnd();
 }
 ```
-**Función**: Dibuja rectángulos usando OpenGL legacy (deprecated en macOS moderno).
+**Función**: Dibuja rectángulos usando OpenGL legacy.
 
-**Sección 3: Inicialización Principal (líneas 20-95)**
+**Sección 3: Inicialización Principal**
 ```cpp
 bool VirtualPiano::initialize() {
-    // GLFW setup
     glfwInit();
     window = glfwCreateWindow(900, 300, "Piano Virtual - QWERTY", nullptr, nullptr);
     glfwSetKeyCallback(window, &VirtualPiano::s_keyCallback);
     
-    // Optimizaciones SSE
     #if defined(__SSE__)
       _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);      // Evitar denormalizados
       _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
     #endif
     
-    // Selección de API de audio (Linux específico)
     RtAudio::Api chosen = RtAudio::UNSPECIFIED;
     if (std::find(apis.begin(), apis.end(), RtAudio::LINUX_PULSE) != apis.end()) {
         chosen = RtAudio::LINUX_PULSE;               // Prefiere PulseAudio
@@ -328,6 +314,8 @@ bool VirtualPiano::initialize() {
         chosen = RtAudio::LINUX_ALSA;                // Fallback a ALSA
     }
 ```
+
+> Función principal que inicializa la App entera, usada en Main, estableciendo las APIs y creando el UI.
 
 **Configuración de Audio:**
 ```cpp
@@ -340,7 +328,7 @@ options.flags = RTAUDIO_MINIMIZE_LATENCY | RTAUDIO_SCHEDULE_REALTIME;
 options.numberOfBuffers = 2;                     // Double buffering
 ```
 
-**Sección 4: Mapeo de Teclas (líneas 97-116)**
+**Sección 4: Mapeo de Teclas**
 ```cpp
 void VirtualPiano::setupKeymap() {
     keyToFreqBase = {
@@ -353,7 +341,7 @@ void VirtualPiano::setupKeymap() {
 ```
 **Función**: Mapea teclas QWERTY a frecuencias musicales (escala de C4 a B4).
 
-**Sección 5: Bucle Principal (líneas 118-125)**
+**Sección 5: Bucle Principal**
 ```cpp
 void VirtualPiano::run() {
     while (!glfwWindowShouldClose(window)) {
@@ -364,7 +352,7 @@ void VirtualPiano::run() {
 }
 ```
 
-**Sección 6: Manejo de Eventos (líneas 139-192)**
+**Sección 6: Manejo de Eventos**
 ```cpp
 void VirtualPiano::keyCallback(int key, int action) {
     if (action == GLFW_PRESS) {
@@ -390,7 +378,7 @@ void VirtualPiano::keyCallback(int key, int action) {
 }
 ```
 
-**Sección 7: Audio Callback - CORAZÓN DEL SINTETIZADOR (líneas 202-252)**
+**Sección 7: Audio Callback - CORAZÓN DEL SINTETIZADOR**
 ```cpp
 int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
     std::fill(out, out + nFrames * params.channels, 0.0f);  // Limpiar buffer
@@ -444,7 +432,7 @@ int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
 }
 ```
 
-**Sección 8: Sistema de Renderizado UI (líneas 254-350)**
+**Sección 8: Sistema de Renderizado UI**
 ```cpp
 void VirtualPiano::drawUI() {
     // Setup viewport y proyección ortogonal
@@ -470,7 +458,7 @@ void VirtualPiano::drawUI() {
 }
 ```
 
-**Sección 9: Renderizado de Teclado (líneas 288-329)**
+**Sección 9: Renderizado de Teclado**
 ```cpp
 void VirtualPiano::drawKeyboard(int width, int height) {
     // Teclas blancas (naturales)
@@ -496,7 +484,7 @@ void VirtualPiano::drawKeyboard(int width, int height) {
 }
 ```
 
-**Sección 10: VU Meters (líneas 331-365)**
+**Sección 10: VU Meters**
 ```cpp
 void VirtualPiano::drawMeters(int width, int height) {
     float rms  = meterRms.load(std::memory_order_relaxed);   // Thread-safe read
@@ -516,7 +504,7 @@ void VirtualPiano::drawMeters(int width, int height) {
 
 ---
 
-#### **`src/Note.hpp`** (82 líneas) - **SINTETIZADOR POR NOTA**
+#### **`src/Note.hpp`** - **SINTETIZADOR POR NOTA**
 
 **Enumeraciones:**
 ```cpp
@@ -586,7 +574,7 @@ inline double nextSample(double sampleRate) {
 
 ---
 
-#### **`cmake/FetchRtAudioPatched.cmake`** (28 líneas)
+#### **`cmake/FetchRtAudioPatched.cmake`**
 
 **Función Principal:**
 ```cpp
@@ -616,7 +604,7 @@ endfunction()
 
 ---
 
-#### **`CMakeLists.txt`** (50 líneas)
+#### **`CMakeLists.txt`**
 
 **Configuración del Proyecto:**
 ```cmake
@@ -690,4 +678,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 - `std::atomic<float>`: VU meters thread-safe sin bloquear audio
 - Lock-free en audio callback: Solo lee atomics, minimiza `mutex` time
 
-## Disfruten de su Piano Virtual 🎹 
+### Disfruten de su Piano Virtual 🎹 
