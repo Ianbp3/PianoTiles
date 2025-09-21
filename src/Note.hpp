@@ -67,33 +67,33 @@ struct Note {
         }
 
         phase += phaseInc;
-        if (phase >= dspconst::TWO_PI) phase -= dspconst::TWO_PI;
+        if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
 
         double x = 0.0;
         switch (wave) {
             case Waveform::Sine:     x = std::sin(phase); break;
             case Waveform::Square:   x = (std::sin(phase) >= 0.0 ? 1.0 : -1.0); break;
-            case Waveform::Triangle: {
-                const double t = phase / dspconst::TWO_PI;
-                x = 4.0 * std::fabs(t - std::floor(t + 0.5)) - 1.0;
-                break;
+                case Waveform::Triangle: {
+                    const double t = phase / dspconst::TWO_PI;
+                    x = 4.0 * std::fabs(t - std::floor(t + 0.5)) - 1.0;
+                    break;
+                }
+                case Waveform::Saw: {
+                    const double t = phase / dspconst::TWO_PI;
+                    x = 2.0 * (t - std::floor(t + 0.5));
+                    break;
+                }
             }
-            case Waveform::Saw: {
-                const double t = phase / dspconst::TWO_PI;
-                x = 2.0 * (t - std::floor(t + 0.5));
-                break;
+
+            double g = 1.0;
+            switch (wave) {
+                case Waveform::Square:   g = dspconst::INV_SQRT2;          break;
+                case Waveform::Triangle: g = std::sqrt(1.5);               break;
+                case Waveform::Saw:      g = std::sqrt(1.5);               break;
+                case Waveform::Sine:     default: g = 1.0;                 break;
             }
-        }
+            constexpr double headroom = 0.90;
 
-        double g = 1.0;
-        switch (wave) {
-            case Waveform::Square:   g = dspconst::INV_SQRT2;          break;
-            case Waveform::Triangle: g = std::sqrt(1.5);               break;
-            case Waveform::Saw:      g = std::sqrt(1.5);               break;
-            case Waveform::Sine:     default: g = 1.0;                 break;
+            return amplitude * env * (headroom * g * x);
         }
-        constexpr double headroom = 0.90;
-
-        return amplitude * env * (headroom * g * x);
-    }
-};
+    };

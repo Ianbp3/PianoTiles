@@ -37,6 +37,11 @@ public:
     void cleanup();
 
 private:
+    // Agregar al inicio de VirtualPiano.hpp como miembros privados:
+std::atomic<int> underrunCount{0};
+std::atomic<double> lastUnderrunTime{0.0};
+std::chrono::high_resolution_clock::time_point startTime;
+
     GLFWwindow* window = nullptr;
     std::unique_ptr<RtAudio> audio;  
     SynthParams params;
