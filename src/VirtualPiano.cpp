@@ -206,47 +206,10 @@ void VirtualPiano::keyCallback(int key, int action) {
     }
 }
 
-//int VirtualPiano::s_audioCallback(void* outputBuffer, void* inputBuffer,
-//                                  unsigned int nBufferFrames, double /*streamTime*/,
-//                                  RtAudioStreamStatus status, void* userData) {
-//    (void)inputBuffer;
-//    if (status) std::fprintf(stderr, "[XRUN] RtAudio=%u\n", status);
-//    auto* self = static_cast<VirtualPiano*>(userData);
-//    return self->audioCallback(static_cast<float*>(outputBuffer), nBufferFrames);
-//}
-
 int VirtualPiano::s_audioCallback(void* outputBuffer, void* inputBuffer,
-                                  unsigned int nBufferFrames, double streamTime,
-                                  RtAudioStreamStatus status, void* userData) {
+                             unsigned int nBufferFrames, double streamTime,
+                             RtAudioStreamStatus status, void* userData) {
     auto* self = static_cast<VirtualPiano*>(userData);
-    
-    // DETECCIÓN DE PROBLEMAS DE AUDIO
-    if (status) {
-        std::fprintf(stderr, "[XRUN] Status=%u, stream_time=%.3f\n", status, streamTime);
-        
-        // Contar underruns para estadísticas
-        self->underrunCount.fetch_add(1);
-        self->lastUnderrunTime.store(streamTime);
-        
-        // RECOVERY STRATEGY para WSL
-        const char* wsl = getenv("WSL_DISTRO_NAME");
-        if (wsl) {
-            // En WSL, resetear estado de audio para evitar drift acumulativo
-            std::lock_guard<std::mutex> lock(self->mtx);
-            
-            // Resetear fases de todas las notas activas para evitar pops
-            for (auto& kv : self->activeNotes) {
-                kv.second.phase = 0.0;
-            }
-            
-            // Llenar con silencio este buffer para dar tiempo al sistema
-            std::fill(static_cast<float*>(outputBuffer), 
-                     static_cast<float*>(outputBuffer) + nBufferFrames * self->params.channels, 
-                     0.0f);
-            return 0;
-        }
-    }
-    
     return self->audioCallback(static_cast<float*>(outputBuffer), nBufferFrames);
 }
 
@@ -369,25 +332,6 @@ int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
         if (!n.alive && !n.pressed) toErase.push_back(kv.first);
     }
     for (int k : toErase) activeNotes.erase(k);
-    static int callCount = 0;
-if (++callCount % 4410 == 0) {  // Cada ~100ms
-    int underruns = underrunCount.load();
-    double lastUR = lastUnderrunTime.load();
-    
-    if (underruns > 0) {
-        auto now = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double>(now - startTime).count();
-        
-        std::printf("[AUDIO] Underruns: %d en %.1fs (último: %.3fs)\n", 
-                    underruns, elapsed, lastUR);
-                    std::cout << "hello";
-        
-        // Si hay muchos underruns, sugerir acción
-        if (underruns > 10) {
-            std::printf("[WARN] Muchos underruns detectados. WSL? Probar buffer más grande.\n");
-        }
-    }
-}
     return 0;
 }
 
