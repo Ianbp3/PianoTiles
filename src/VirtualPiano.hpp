@@ -11,23 +11,19 @@
 #endif
 
 #include <GLFW/glfw3.h>
-#include <memory> 
 #include <RtAudio.h>
 #include <unordered_map>
-#include <vector>
 #include <mutex>
-#include <string>
-#include <atomic>
 #include "Note.hpp"
 
 struct SynthParams {
     double sampleRate = 44100.0;
-    unsigned int bufferFrames = 512;
-    unsigned int channels = 2;
+    int bufferFrames = 512;
+    int channels = 2;
     double masterGain = 0.5;
-    int    octaveOffset = 0;
+    int octaveOffset = 0;
     Waveform waveform = Waveform::Sine;
-    bool   chorus = false;
+    bool chorus = false;
 };
 
 class VirtualPiano {
@@ -37,34 +33,29 @@ public:
     void cleanup();
 
 private:
-    // Agregar al inicio de VirtualPiano.hpp como miembros privados:
-std::atomic<int> underrunCount{0};
-std::atomic<double> lastUnderrunTime{0.0};
-std::chrono::high_resolution_clock::time_point startTime;
-
     GLFWwindow* window = nullptr;
-    std::unique_ptr<RtAudio> audio;  
+    RtAudio audio;
     SynthParams params;
 
-    std::unordered_map<int, double> keyToFreqBase;
+    std::unordered_map<int, double> keyFrequencies;
     std::unordered_map<int, Note> activeNotes;
-    std::mutex mtx;
+    std::mutex notesMutex;
 
-    std::atomic<float> meterRms{0.0f};
-    std::atomic<float> meterPeak{0.0f};
+    float currentRMS = 0.0f;
+    float currentPeak = 0.0f;
 
-    std::vector<float> delayL, delayR;
-    size_t delayIdx = 0;
+    std::vector<float> delayBufferL, delayBufferR;
+    int delayIndex = 0;
 
-    void setupKeymap();
-    static void s_keyCallback(GLFWwindow* w, int key, int sc, int action, int mods);
-    void keyCallback(int key, int action);
-    static int s_audioCallback(void* outputBuffer, void* inputBuffer,
-                               unsigned int nBufferFrames, double streamTime,
-                               RtAudioStreamStatus status, void* userData);
-    int audioCallback(float* out, unsigned int nFrames);
+    void setupKeyMapping();
+    void handleKeyEvent(int key, int action);
+    int processAudio(float* outputBuffer, int frameCount);
+    void renderUI();
+    void drawKeyboard(int w, int h);
+    void drawVUMeters(int w, int h);
 
-    void drawUI();
-    void drawKeyboard(int width, int height);
-    void drawMeters(int width, int height);
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static int audioCallback(void* outputBuffer, void* inputBuffer,
+                           unsigned int nBufferFrames, double streamTime,
+                           RtAudioStreamStatus status, void* userData);
 };

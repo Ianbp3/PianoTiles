@@ -1,99 +1,137 @@
 #pragma once
 #include <cmath>
-#include <cstdint>
 #include <algorithm>
 
 enum class Waveform { Sine = 0, Square = 1, Triangle = 2, Saw = 3 };
-enum class EnvStage { Idle, Attack, Decay, Sustain, Release };
+enum class EnvelopeState { Attack, Decay, Sustain, Release, Idle };
 
-namespace dspconst {
-    constexpr double PI        = 3.14159265358979323846;
-    constexpr double TWO_PI    = 6.28318530717958647692;
-    constexpr double INV_SQRT2 = 0.70710678118654752440;
-}
-
-struct Note {
+class Note {
+private:
+    static constexpr double PI = 3.14159265358979323846;
+    static constexpr double TWO_PI = 2.0 * PI;
+    
+    // Oscillator
     double frequency = 440.0;
-    double phase     = 0.0;
-    double phaseInc  = 0.0;
-
+    double phase = 0.0;
+    double phaseIncrement = 0.0;
+    
+    // State
+    bool pressed = false;
+    bool active = false;
+    
+    // Envelope (ADSR)
+    EnvelopeState envelopeState = EnvelopeState::Idle;
+    double envelopeLevel = 0.0;
+    
+    // Envelope timing (in seconds)
+    double attackTime = 0.01;   // 10ms
+    double decayTime = 0.06;    // 60ms
+    double sustainLevel = 0.7;  // 70%
+    double releaseTime = 0.15;  // 150ms
+    
+    // Current waveform and amplitude
+    Waveform currentWaveform = Waveform::Sine;
     double amplitude = 0.5;
-
-    bool   pressed = false;
-    bool   alive   = false;
-
-    EnvStage stage = EnvStage::Idle;
-    double env     = 0.0;
-
-    double attackSec  = 0.010;
-    double decaySec   = 0.060;
-    double sustainLvl = 0.70;
-    double releaseSec = 0.5;
-
-    Waveform wave = Waveform::Sine;
-
-    void setFrequency(double f, double sampleRate) {
-        frequency = f;
-        phaseInc  = dspconst::TWO_PI * frequency / sampleRate;
+    
+    double generateWaveform() {
+        switch (currentWaveform) {
+            case Waveform::Sine:
+                return std::sin(phase);
+                
+            case Waveform::Square:
+                return (std::sin(phase) >= 0.0) ? 1.0 : -1.0;
+                
+            case Waveform::Triangle: {
+                double t = phase / TWO_PI;
+                return 4.0 * std::abs(t - std::floor(t + 0.5)) - 1.0;
+            }
+            
+            case Waveform::Saw: {
+                double t = phase / TWO_PI;
+                return 2.0 * (t - std::floor(t + 0.5));
+            }
+        }
+        return 0.0;
+    }
+    
+    void updateEnvelope(double sampleRate) {
+        double stepSize = 1.0 / sampleRate;
+        
+        switch (envelopeState) {
+            case EnvelopeState::Attack:
+                envelopeLevel += stepSize / attackTime;
+                if (envelopeLevel >= 1.0) {
+                    envelopeLevel = 1.0;
+                    envelopeState = EnvelopeState::Decay;
+                }
+                break;
+                
+            case EnvelopeState::Decay:
+                envelopeLevel -= stepSize * (1.0 - sustainLevel) / decayTime;
+                if (envelopeLevel <= sustainLevel) {
+                    envelopeLevel = sustainLevel;
+                    envelopeState = EnvelopeState::Sustain;
+                }
+                break;
+                
+            case EnvelopeState::Sustain:
+                envelopeLevel = sustainLevel;
+                break;
+                
+            case EnvelopeState::Release:
+                envelopeLevel -= stepSize * sustainLevel / releaseTime;
+                if (envelopeLevel <= 0.0) {
+                    envelopeLevel = 0.0;
+                    envelopeState = EnvelopeState::Idle;
+                    active = false;
+                }
+                break;
+                
+            case EnvelopeState::Idle:
+                envelopeLevel = 0.0;
+                break;
+        }
     }
 
-    inline double nextSample(double sampleRate) {
-        const double aStep = (attackSec  > 0.0) ? 1.0 / (attackSec  * sampleRate) : 1.0;
-        const double dStep = (decaySec   > 0.0) ? 1.0 / (decaySec   * sampleRate) : 1.0;
-        const double rStep = (releaseSec > 0.0) ? 1.0 / (releaseSec * sampleRate) : 1.0;
-
-        switch (stage) {
-            case EnvStage::Attack:
-                env += aStep;
-                if (env >= 1.0) { env = 1.0; stage = EnvStage::Decay; }
-                break;
-            case EnvStage::Decay: {
-                const double dec = dStep * (1.0 - sustainLvl);
-                env -= dec;
-                if (env <= sustainLvl) { env = sustainLvl; stage = EnvStage::Sustain; }
-                break;
-            }
-            case EnvStage::Sustain:
-                env = sustainLvl;
-                break;
-            case EnvStage::Release:
-                env -= rStep;
-                if (env <= 0.0) { env = 0.0; stage = EnvStage::Idle; alive = false; }
-                break;
-            case EnvStage::Idle:
-            default:
-                env = 0.0;
-                break;
+public:
+    void startNote(double freq, double sampleRate, Waveform waveform) {
+        frequency = freq;
+        currentWaveform = waveform;
+        phaseIncrement = TWO_PI * frequency / sampleRate;
+        
+        pressed = true;
+        active = true;
+        envelopeState = EnvelopeState::Attack;
+        envelopeLevel = 0.0;
+        phase = 0.0;
+    }
+    
+    void stopNote() {
+        pressed = false;
+        if (envelopeState != EnvelopeState::Idle) {
+            envelopeState = EnvelopeState::Release;
         }
-
-        phase += phaseInc;
-        if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-
-        double x = 0.0;
-        switch (wave) {
-            case Waveform::Sine:     x = std::sin(phase); break;
-            case Waveform::Square:   x = (std::sin(phase) >= 0.0 ? 1.0 : -1.0); break;
-                case Waveform::Triangle: {
-                    const double t = phase / dspconst::TWO_PI;
-                    x = 4.0 * std::fabs(t - std::floor(t + 0.5)) - 1.0;
-                    break;
-                }
-                case Waveform::Saw: {
-                    const double t = phase / dspconst::TWO_PI;
-                    x = 2.0 * (t - std::floor(t + 0.5));
-                    break;
-                }
-            }
-
-            double g = 1.0;
-            switch (wave) {
-                case Waveform::Square:   g = dspconst::INV_SQRT2;          break;
-                case Waveform::Triangle: g = std::sqrt(1.5);               break;
-                case Waveform::Saw:      g = std::sqrt(1.5);               break;
-                case Waveform::Sine:     default: g = 1.0;                 break;
-            }
-            constexpr double headroom = 0.90;
-
-            return amplitude * env * (headroom * g * x);
+    }
+    
+    double getSample() {
+        if (!active) return 0.0;
+        
+        // Update envelope
+        updateEnvelope(44100.0); // Assuming 44.1kHz sample rate
+        
+        // Generate waveform
+        double waveValue = generateWaveform();
+        
+        // Advance phase
+        phase += phaseIncrement;
+        if (phase >= TWO_PI) {
+            phase -= TWO_PI;
         }
-    };
+        
+        // Apply envelope and amplitude
+        return amplitude * envelopeLevel * waveValue * 0.8; // 20% headroom
+    }
+    
+    bool isActive() const { return active; }
+    bool isPressed() const { return pressed; }
+};
