@@ -11,6 +11,7 @@ Un sintetizador de piano virtual en tiempo real que permite tocar música usando
 - **VU Meters** - Visualización RMS y Peak en tiempo real
 - **Interfaz visual** - Teclado de piano interactivo con feedback visual
 - **Control dinámico** - Volumen, octavas y formas de onda en vivo
+- **Efecto Chorus** - Espacialización estéreo con modulación LFO
 
 ## 🎮 Controles
 
@@ -31,22 +32,23 @@ Notas:                        C#4 D#4   F#4 G#4 A#4
   - `2` - Square (8-bit)
   - `3` - Triangle (Cálido)  
   - `4` - Saw (Brillante)
-- **Chorus:** `C` 
+- **Chorus:** `C` (Alternar efecto espacial)
 - **Salir:** `ESC`
 
 ## 🏗️ Arquitectura y Decisiones de Diseño
 
 ### Arquitectura de Audio
 ```
-[Teclado QWERTY] → [Note Objects] → [Mixer] → [Soft Limiter] → [RtAudio] → [Speakers]
+[Teclado QWERTY] → [Note Objects] → [Mixer] → [Chorus/Effects] → [Soft Limiter] → [RtAudio] → [Speakers]
 ```
 
 **Flujo de procesamiento:**
 1. **Input**: Callbacks de GLFW capturan eventos de teclado
 2. **Síntesis**: Cada nota genera samples usando osciladores + ADSR
 3. **Mixing**: Suma de todas las voces activas por frame
-4. **Processing**: Soft-knee limiting para prevenir clipping
-5. **Output**: Buffer estéreo float32 enviado a RtAudio
+4. **Effects**: Aplicación opcional de chorus estéreo
+5. **Processing**: Soft-knee limiting para prevenir clipping
+6. **Output**: Buffer estéreo float32 enviado a RtAudio
 
 ### Decisiones Técnicas Clave
 
@@ -54,16 +56,22 @@ Notas:                        C#4 D#4   F#4 G#4 A#4
 - **Sample Rate**: 44.1kHz fijo (estándar de audio)
 - **Buffer Size**: 512 frames (≈11.6ms de latencia)
 - **Threading**: Audio callback en thread de alta prioridad (RT)
-- **Lock Strategy**: Mutex mínimo para syncronización estado UI ↔ Audio
+- **Lock Strategy**: Mutex mínimo para sincronización estado UI ↔ Audio
 
 #### **Síntesis de Audio**
-- **ADSR por Nota**: Attack=10ms, Decay=60ms, Sustain=70%, Release=120ms
-- **Normalización RMS**: Cada forma de onda normalizada para volumen consistente
-- **Headroom**: 10% de margen para prevenir saturación
+- **ADSR por Nota**: Attack=10ms, Decay=60ms, Sustain=70%, Release=150ms
+- **Normalización por Forma**: Cada waveform optimizada para volumen consistente
+- **Headroom**: 20% de margen para prevenir saturación
 - **Polifonía**: Sin límite artificial (limitado por CPU)
 
+#### **Efectos de Audio**
+- **Chorus Estéreo**: Dual LFO (0.8Hz L, 1.2Hz R) con delay modulado
+- **Delay Base**: 18ms ± 6ms de modulación por canal
+- **Interpolación**: Linear entre samples para suavidad
+- **Mix Level**: 70% dry + 30% wet para balance natural
+
 #### **Compatibilidad Multiplataforma**
-- **Linux**: PulseAudio (preferido) → ALSA (fallback)
+- **Linux**: PulseAudio (preferido) → ALSA (desactivado por defecto)
 - **Windows**: WASAPI (recomendado para baja latencia)
 - **macOS**: CoreAudio (nativo)
 - **WSLg**: Soporte completo via PulseAudio bridge
@@ -128,7 +136,6 @@ echo $PULSE_SERVER  # Debe mostrar: unix:/mnt/wslg/PulseServer
 mkdir build && cd build
 cmake .. && make -j
 ./PianoTiles
-
 ```
 
 ## 🔧 Solución de Problemas
@@ -192,7 +199,8 @@ sudo apt install -y libx11-dev libxrandr-dev libxinerama-dev
 | Buffer Size | 512 frames | Balance latencia vs. estabilidad |
 | Channels | 2 (Stereo) | Estándar, extensible a surround |
 | Latency Target | < 20ms | Percepción humana de "instantáneo" |
-| Polyphony | Unlimited* | *Limitado por CPU (~20-50 voces típico |
+| Polyphony | Unlimited* | *Limitado por CPU (~20-50 voces típico) |
+| Chorus Delay | 18ms ± 6ms | Rango óptimo para espacialización |
 
 ## 🧬 Estructura del Código y Explicación de Archivos
 
@@ -200,8 +208,6 @@ sudo apt install -y libx11-dev libxrandr-dev libxinerama-dev
 PianoTiles/
 ├── CMakeLists.txt                    # Sistema de build principal
 ├── README.md                         # Documentación del proyecto
-├── cmake/
-│   └── FetchRtAudioPatched.cmake    # Descarga y parcha RtAudio
 └── src/
     ├── main.cpp                      # Punto de entrada de la aplicación
     ├── VirtualPiano.hpp              # Header de la clase principal
@@ -227,11 +233,12 @@ int main() {
     return 0;
 }
 ```
-**Función**: Entry point minimalista que instancia la aplicación y maneja el ciclo de vida.
+> **Función**: Entry point minimalista que instancia la aplicación y maneja el ciclo de vida completo del programa.
 
 ---
 
-#### **`src/VirtualPiano.hpp`**
+#### **`src/VirtualPiano.hpp`** - **INTERFAZ PRINCIPAL**
+
 **Imports y Configuración:**
 ```cpp
 #ifndef GLFW_INCLUDE_NONE            
@@ -245,45 +252,35 @@ int main() {
 #endif
 ```
 
-> Headers adaptados por multiplataforma.
+> **Configuración multiplataforma**: Headers adaptados según el sistema operativo para máxima compatibilidad.
 
-**Estructura Principal:**
+**Estructura de Parámetros:**
 ```cpp
 struct SynthParams {                 
     double sampleRate = 44100.0;     
-    unsigned int bufferFrames = 512;  
-    unsigned int channels = 2;        
-    double masterGain = 0.3;          
-    int    octaveOffset = 0;          
+    int bufferFrames = 512;          
+    int channels = 2;                
+    double masterGain = 0.5;         // Volumen inicial más conservador
+    int octaveOffset = 0;            
     Waveform waveform = Waveform::Sine; 
-    bool   chorus = false;            
+    bool chorus = false;             // Nuevo: control de efectos
 };
 ```
 
-> Acá se determina la configuración global del sintetizador. Esto facilita las pruebas que se quieran realizar ya que cualquier cambio general rápido se puede realizar desde en esta sección del código.
+> **Centralización de configuración**: Todos los parámetros globales del sintetizador en una estructura, facilitando ajustes y experimentación.
 
 **Clase VirtualPiano:**
-- **Miembros privados**: `window` (GLFW), `audio` (RtAudio), `params`, `keyToFreqBase` (mapeo teclas), `activeNotes` (notas sonando)
-- **Sincronización**: `std::mutex mtx` para comunicación UI ↔ Audio thread
-- **VU Meters**: `std::atomic<float> meterRms/Peak` para visualización thread-safe
-- **Métodos públicos**: `initialize()`, `run()`, `cleanup()`
-- **Callbacks estáticos**: `s_keyCallback()`, `s_audioCallback()` (wrappers para GLFW/RtAudio)
+- **Miembros de estado**: `window` (GLFW), `audio` (RtAudio), `params`, `keyFrequencies` (mapeo optimizado)
+- **Gestión de notas**: `activeNotes` (hash map para acceso O(1)), `notesMutex` (sincronización)
+- **VU Meters**: `currentRMS/Peak` para visualización en tiempo real
+- **Efectos**: `delayBufferL/R`, `delayIndex` para implementación de chorus
+- **Callbacks estáticos**: Wrappers para interfaz C de GLFW/RtAudio
 
 ---
 
-#### **`src/VirtualPiano.cpp`** - **ARCHIVO PRINCIPAL**
+#### **`src/VirtualPiano.cpp`** - **IMPLEMENTACIÓN PRINCIPAL**
 
-**Sección 1: Optimizaciones SSE **
-```cpp
-#if defined(__SSE__)
-  #include <xmmintrin.h>
-  #include <pmmintrin.h>
-#endif
-```
-
-> Incluye headers para optimizaciones SIMD en arquitecturas x86.
-
-**Sección 2: Función auxiliar OpenGL**
+**Sección 1: Utilidades de Renderizado**
 ```cpp
 static void drawRect(float x, float y, float w, float h, bool filled=true) {
     if (filled) glBegin(GL_QUADS);    // OpenGL legacy mode
@@ -293,45 +290,38 @@ static void drawRect(float x, float y, float w, float h, bool filled=true) {
     glEnd();
 }
 ```
-**Función**: Dibuja rectángulos usando OpenGL legacy.
+> **Abstracción OpenGL**: Función helper que simplifica el dibujo de rectángulos, tanto rellenos como contornos.
 
-**Sección 3: Inicialización Principal**
+**Sección 2: Inicialización Principal**
 ```cpp
 bool VirtualPiano::initialize() {
+    // Setup GLFW window y contexto OpenGL
     glfwInit();
-    window = glfwCreateWindow(900, 300, "Piano Virtual - QWERTY", nullptr, nullptr);
-    glfwSetKeyCallback(window, &VirtualPiano::s_keyCallback);
+    window = glfwCreateWindow(700, 300, "Piano Tiles", nullptr, nullptr);
+    glfwSetKeyCallback(window, &VirtualPiano::keyCallback);
     
-    #if defined(__SSE__)
-      _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);      // Evitar denormalizados
-      _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-    #endif
+    // Configuración RtAudio con parámetros optimizados
+    RtAudio::StreamParameters outputParams;
+    outputParams.deviceId = audio.getDefaultOutputDevice();
+    outputParams.nChannels = params.channels;
     
-    RtAudio::Api chosen = RtAudio::UNSPECIFIED;
-    if (std::find(apis.begin(), apis.end(), RtAudio::LINUX_PULSE) != apis.end()) {
-        chosen = RtAudio::LINUX_PULSE;               // Prefiere PulseAudio
-    } else if (std::find(apis.begin(), apis.end(), RtAudio::LINUX_ALSA) != apis.end()) {
-        chosen = RtAudio::LINUX_ALSA;                // Fallback a ALSA
-    }
+    RtAudio::StreamOptions options;
+    options.flags = RTAUDIO_MINIMIZE_LATENCY;     // Prioridad en latencia
+    options.numberOfBuffers = 2;                 // Double buffering
+    
+    // Inicializar buffers para efectos
+    int delaySamples = (int)(params.sampleRate * 0.04);  // 40ms max delay
+    delayBufferL.resize(delaySamples, 0.0f);
+    delayBufferR.resize(delaySamples, 0.0f);
+}
 ```
 
-> Función principal que inicializa la App entera, usada en Main, estableciendo las APIs y creando el UI.
+> **Inicialización completa**: Setup de window, audio engine y buffers de efectos en una función centralizada.
 
-**Configuración de Audio:**
+**Sección 3: Mapeo de Teclas Simplificado**
 ```cpp
-RtAudio::StreamParameters oParams;
-oParams.deviceId = audio->getDefaultOutputDevice();
-oParams.nChannels = params.channels;              // 2 (estéreo)
-
-RtAudio::StreamOptions options;
-options.flags = RTAUDIO_MINIMIZE_LATENCY | RTAUDIO_SCHEDULE_REALTIME;
-options.numberOfBuffers = 2;                     // Double buffering
-```
-
-**Sección 4: Mapeo de Teclas**
-```cpp
-void VirtualPiano::setupKeymap() {
-    keyToFreqBase = {
+void VirtualPiano::setupKeyMapping() {
+    keyFrequencies = {
         {GLFW_KEY_A, 261.63},    // C4
         {GLFW_KEY_W, 277.18},    // C#4
         {GLFW_KEY_S, 293.66},    // D4
@@ -339,272 +329,317 @@ void VirtualPiano::setupKeymap() {
     };
 }
 ```
-**Función**: Mapea teclas QWERTY a frecuencias musicales (escala de C4 a B4).
+> **Mapeo directo**: Hash map que relaciona teclas QWERTY con frecuencias musicales, eliminando cálculos complejos en tiempo real.
 
-**Sección 5: Bucle Principal**
+**Sección 4: Manejo de Eventos Unificado**
 ```cpp
-void VirtualPiano::run() {
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();        // Procesar eventos de entrada
-        drawUI();               // Renderizar interfaz
-        glfwSwapBuffers(window); // Present frame
-    }
-}
-```
-
-**Sección 6: Manejo de Eventos**
-```cpp
-void VirtualPiano::keyCallback(int key, int action) {
+void VirtualPiano::handleKeyEvent(int key, int action) {
     if (action == GLFW_PRESS) {
-        // Controles especiales
-        if (key == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(window, 1);
-        if (key == GLFW_KEY_RIGHT) params.masterGain += 0.05;  // Volumen +
-        if (key == GLFW_KEY_UP) params.octaveOffset++;         // Octava +
-        if (key == GLFW_KEY_1) params.waveform = Waveform::Sine; // Cambiar forma
+        // Controles especiales (volumen, octavas, waveforms, efectos)
+        if (key == GLFW_KEY_RIGHT) params.masterGain += 0.05;
+        if (key == GLFW_KEY_C) params.chorus = !params.chorus;  // Toggle chorus
         
-        // Activar nota musical
-        auto it = keyToFreqBase.find(key);
-        if (it != keyToFreqBase.end()) {
-            std::lock_guard<std::mutex> lock(mtx);      // Sincronización
-            Note& n = activeNotes[key];
-            n.alive = true;
-            n.pressed = true;
-            n.stage = EnvStage::Attack;                 // Iniciar ADSR
-            double freq = it->second * std::pow(2.0, params.octaveOffset);
-            n.setFrequency(freq, params.sampleRate);
+        // Activar notas musicales
+        auto it = keyFrequencies.find(key);
+        if (it != keyFrequencies.end()) {
+            std::lock_guard<std::mutex> lock(notesMutex);
+            Note& note = activeNotes[key];
+            note.startNote(it->second * std::pow(2.0, params.octaveOffset), 
+                          params.sampleRate, params.waveform);
         }
     }
-    // GLFW_RELEASE: iniciar Release en ADSR
+    // GLFW_RELEASE: stopNote() para envolvente release
 }
 ```
 
-**Sección 7: Audio Callback - CORAZÓN DEL SINTETIZADOR**
+> **Gestión centralizada**: Todos los eventos de teclado procesados en una función, separando controles de parámetros de notas musicales.
+
+**Sección 5: Audio Callback - MOTOR DEL SINTETIZADOR**
 ```cpp
-int VirtualPiano::audioCallback(float* out, unsigned int nFrames) {
-    std::fill(out, out + nFrames * params.channels, 0.0f);  // Limpiar buffer
+int VirtualPiano::processAudio(float* outputBuffer, int frameCount) {
+    std::fill(outputBuffer, outputBuffer + frameCount * params.channels, 0.0f);
+    std::lock_guard<std::mutex> lock(notesMutex);
     
-    std::lock_guard<std::mutex> lock(mtx);                  // Sincronizar con UI
-    
-    for (unsigned int i = 0; i < nFrames; ++i) {
-        double mix = 0.0;
+    for (int frame = 0; frame < frameCount; ++frame) {
+        double mixedSample = 0.0;
         
         // MIXER: Sumar todas las notas activas
-        for (auto& kv : activeNotes) {
-            Note& n = kv.second;
-            if (!n.alive) continue;
-            mix += n.nextSample(params.sampleRate);          // Generar sample
+        for (auto& [key, note] : activeNotes) {
+            if (note.isActive()) {
+                mixedSample += note.getSample();
+            }
         }
         
-        mix *= params.masterGain;                           // Aplicar volumen
+        mixedSample *= params.masterGain;
         
         // SOFT-KNEE LIMITER (prevenir clipping)
-        const double thr = 0.90, knee = 0.10;
-        double a = std::fabs(mix);
-        if (a > thr) {
-            double t = std::min(1.0, (a - thr) / knee);
-            double comp = thr + knee * (t - (t*t*t)/3.0);   // Compresión suave
-            mix = (mix < 0.0 ? -comp : comp);
+        double absLevel = std::abs(mixedSample);
+        if (absLevel > 0.9) {
+            double excess = (absLevel - 0.9) / 0.1;
+            double compressed = 0.9 + 0.1 * (excess - (excess*excess*excess)/3.0);
+            mixedSample = (mixedSample < 0) ? -compressed : compressed;
         }
         
-        // Hard clipping como último recurso
-        mix = std::clamp(mix, -1.0, 1.0);
+        // CHORUS EFFECT (cuando está activado)
+        if (params.chorus && params.channels >= 2) {
+            applyChorusEffect(mixedSample, frame, outputBuffer);
+        } else {
+            // Salida directa estéreo/mono
+            outputBuffer[frame * params.channels + 0] = mixedSample;
+            if (params.channels > 1) {
+                outputBuffer[frame * params.channels + 1] = mixedSample;
+            }
+        }
         
-        // Escribir a buffer estéreo
-        float s = static_cast<float>(mix);
-        out[params.channels * i + 0] = s;      // Left
-        if (params.channels > 1) out[params.channels * i + 1] = s;  // Right
-        
-        // Calcular métricas para VU meters
-        if (std::fabs(mix) > peakAbs) peakAbs = std::fabs(mix);
-        rmsAcc += mix * mix;
+        // Calcular métricas RMS/Peak para VU meters
+        updateVUMeters(mixedSample);
     }
     
-    // Actualizar VU meters (thread-safe)
-    meterRms.store(std::sqrt(rmsAcc / nFrames), std::memory_order_relaxed);
-    meterPeak.store(peakAbs, std::memory_order_relaxed);
-    
-    // Garbage collection de notas muertas
-    std::vector<int> toErase;
-    for (auto& kv : activeNotes) {
-        if (!kv.second.alive && !kv.second.pressed) toErase.push_back(kv.first);
-    }
-    for (int k : toErase) activeNotes.erase(k);
+    // Garbage collection de notas inactivas
+    cleanupInactiveNotes();
 }
 ```
 
-**Sección 8: Sistema de Renderizado UI**
+> **Motor de audio**: Función principal que procesa cada frame de audio, combinando síntesis, efectos, limitación y métricas.
+
+**Sección 6: Implementación de Chorus**
 ```cpp
-void VirtualPiano::drawUI() {
-    // Setup viewport y proyección ortogonal
-    glViewport(0, 0, w, h);
-    glOrtho(0, w, h, 0, -1, 1);                    // 2D projection
+// Dentro del audio callback cuando chorus está activo
+if (params.chorus && params.channels >= 2 && !delayBufferL.empty()) {
+    static double lfoPhaseL = 0.0, lfoPhaseR = 0.0;
+    const double lfoFreqL = 0.8, lfoFreqR = 1.2;           // Frecuencias LFO diferentes
     
-    glClearColor(0.08f, 0.08f, 0.1f, 1.0f);       // Fondo azul oscuro
+    const float baseDelay = 18.0f;                         // Delay base en ms
+    const float depthDelay = 6.0f;                         // Profundidad modulación
+    
+    // Calcular delays modulados por LFO
+    float delayTimeL = baseDelay + depthDelay * std::sin(lfoPhaseL);
+    float delayTimeR = baseDelay + depthDelay * std::sin(lfoPhaseR);
+    
+    // Escritura circular en buffers
+    delayBufferL[delayIndex] = sample;
+    delayBufferR[delayIndex] = sample;
+    
+    // Lectura interpolada de delays
+    float delayedL = readDelay(delayBufferL, delayIndex, delaySamplesL);
+    float delayedR = readDelay(delayBufferR, delayIndex, delaySamplesR);
+    
+    // Mix dry/wet y salida estéreo
+    const float dryLevel = 0.7f, wetLevel = 0.3f;
+    outputBuffer[frame*2+0] = dryLevel*sample + wetLevel*delayedL;
+    outputBuffer[frame*2+1] = dryLevel*sample + wetLevel*delayedR;
+}
+```
+
+> **Chorus estéreo**: Implementación de efecto espacial usando dual LFO con frecuencias ligeramente diferentes para crear movimiento estéreo natural.
+
+**Sección 7: Sistema de Renderizado UI**
+```cpp
+void VirtualPiano::renderUI() {
+    // Setup viewport y proyección ortogonal 2D
+    glfwGetFramebufferSize(window, &w, &h);
+    glViewport(0, 0, w, h);
+    glOrtho(0, w, h, 0, -1, 1);
+    
+    glClearColor(0.1f, 0.1f, 0.15f, 1.0f);       // Fondo azul oscuro
     glClear(GL_COLOR_BUFFER_BIT);
     
-    drawKeyboard(w, h);                            // Teclado visual
+    drawKeyboard(w, h);                           // Teclado visual interactivo
+    drawVUMeters(w, h);                           // Medidores de nivel
     
-    // Barra de volumen
-    glColor3f(0.2f, 0.8f, 0.4f);                  // Verde
-    drawRect(20, 20, params.masterGain * (w - 40), 12, true);
+    // Barra de volumen dinámica
+    glColor3f(0.2f, 0.8f, 0.4f);
+    drawRect(20, 20, (float)(params.masterGain * (w-40)), 15, true);
     
-    drawMeters(w, h);                              // VU meters
-    
-    // Debug info cada 1.5 segundos
+    // Debug info periódico
     static double lastPrint = 0.0;
-    if (glfwGetTime() - lastPrint > 1.5) {
-        std::printf("[Piano] vol=%.2f octave=%+d wave=%s\n", ...);
+    if (glfwGetTime() - lastPrint > 2.0) {
+        printStatusInfo();
+        lastPrint = glfwGetTime();
     }
 }
 ```
 
-**Sección 9: Renderizado de Teclado**
+> **Interfaz visual**: Sistema de renderizado 2D que combina teclado interactivo, medidores de nivel y controles visuales.
+
+**Sección 8: Renderizado de Teclado Mejorado**
 ```cpp
 void VirtualPiano::drawKeyboard(int width, int height) {
-    // Teclas blancas (naturales)
-    int whites[7] = { GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D, 
-                      GLFW_KEY_F, GLFW_KEY_G, GLFW_KEY_H, GLFW_KEY_J };
+    // Teclas blancas con estado visual
+    int whiteKeys[] = { GLFW_KEY_A, GLFW_KEY_S, GLFW_KEY_D, 
+                        GLFW_KEY_F, GLFW_KEY_G, GLFW_KEY_H, GLFW_KEY_J };
     
-    for (int i = 0; i < 7; ++i) {
-        bool on = activeNotes.find(whites[i]) != activeNotes.end() && 
-                  activeNotes[whites[i]].pressed;
-        
-        glColor3f(on ? 0.9f : 0.95f, on ? 0.9f : 0.95f, on ? 0.3f : 0.95f);
-        drawRect(x0 + i * whiteW, y0, whiteW - 2.0f, whiteH, true);
+    bool whitePressed[7] = {false};
+    {
+        std::lock_guard<std::mutex> lock(notesMutex);
+        for (int i = 0; i < 7; ++i) {
+            auto it = activeNotes.find(whiteKeys[i]);
+            whitePressed[i] = (it != activeNotes.end() && it->second.isPressed());
+        }
     }
     
-    // Teclas negras (sostenidos) - posicionadas entre blancas
-    struct BK { int key; int posIndex; };
-    BK blacks[] = { {GLFW_KEY_W, 0}, {GLFW_KEY_E, 1}, ... };
+    // Renderizar teclas blancas con feedback visual
+    for (int i = 0; i < 7; ++i) {
+        bool pressed = whitePressed[i];
+        glColor3f(pressed ? 0.9f : 0.95f, pressed ? 0.9f : 0.95f, 
+                  pressed ? 0.3f : 0.95f);  // Amarillo cuando presionado
+        drawRect(x + i * keyWidth, y, keyWidth - 2.0f, keyHeight, true);
+    }
     
-    for (auto& b : blacks) {
-        float bx = x0 + (b.posIndex + 1) * whiteW - blackW * 0.5f;  // Centrar
-        // Renderizar con color según estado pressed
+    // Teclas negras con posicionamiento preciso
+    struct BlackKey { int keyCode; int position; };
+    BlackKey blackKeys[] = { {GLFW_KEY_W, 0}, {GLFW_KEY_E, 1}, 
+                            {GLFW_KEY_T, 3}, {GLFW_KEY_Y, 4}, {GLFW_KEY_U, 5} };
+    
+    for (auto& bk : blackKeys) {
+        bool pressed = checkBlackKeyPressed(bk.keyCode);
+        float x = calculateBlackKeyPosition(bk.position);
+        renderBlackKey(x, y, pressed);
     }
 }
 ```
 
-**Sección 10: VU Meters**
+> **Teclado visual avanzado**: Renderizado preciso de teclas blancas y negras con feedback visual en tiempo real y posicionamiento matemático correcto.
+
+**Sección 9: VU Meters con Código de Color**
 ```cpp
-void VirtualPiano::drawMeters(int width, int height) {
-    float rms  = meterRms.load(std::memory_order_relaxed);   // Thread-safe read
-    float peak = meterPeak.load(std::memory_order_relaxed);
+void VirtualPiano::drawVUMeters(int w, int h) {
+    float rms = std::clamp(currentRMS, 0.0f, 1.0f);
+    float peak = std::clamp(currentPeak, 0.0f, 1.0f);
     
-    // Dibujar barras verticales (RMS left, Peak right)
-    auto setColor = [](float v){
-        if (v >= 0.90f) glColor3f(0.95f, 0.30f, 0.30f);      // Rojo (loud)
-        else if (v >= 0.70f) glColor3f(0.95f, 0.80f, 0.30f); // Amarillo (medium)
-        else glColor3f(0.30f, 0.85f, 0.40f);                 // Verde (quiet)
+    // Función lambda para colores dinámicos
+    auto setMeterColor = [](float level) {
+        if (level >= 0.9f) glColor3f(0.95f, 0.3f, 0.3f);      // Rojo (loud)
+        else if (level >= 0.7f) glColor3f(0.95f, 0.8f, 0.3f); // Amarillo (medium)
+        else glColor3f(0.3f, 0.85f, 0.4f);                    // Verde (quiet)
     };
     
-    setColor(rms);
-    drawRect(x + 2.f, y + (barH - rmsH), (barW * 0.5f) - 3.f, rmsH, true);
+    // Dual meters: RMS (left) y Peak (right)
+    setMeterColor(rms);
+    drawRect(meterX + 2.0f, meterY + (meterHeight - rmsHeight), 
+             (meterWidth * 0.5f) - 3.0f, rmsHeight, true);
+    
+    setMeterColor(peak);
+    drawRect(meterX + (meterWidth * 0.5f) + 1.0f, meterY + (meterHeight - peakHeight), 
+             (meterWidth * 0.5f) - 3.0f, peakHeight, true);
 }
 ```
 
+> **Medidores profesionales**: VU meters duales con código de colores que indican niveles de señal RMS y Peak para monitoreo profesional.
+
 ---
 
-#### **`src/Note.hpp`** - **SINTETIZADOR POR NOTA**
+#### **`src/Note.hpp`** - **SINTETIZADOR POR NOTA OPTIMIZADO**
 
-**Enumeraciones:**
+**Enumeraciones y Constantes:**
 ```cpp
 enum class Waveform { Sine = 0, Square = 1, Triangle = 2, Saw = 3 };
-enum class EnvStage { Idle, Attack, Decay, Sustain, Release };
+enum class EnvelopeState { Attack, Decay, Sustain, Release, Idle };
+
+class Note {
+private:
+    static constexpr double PI = 3.14159265358979323846;
+    static constexpr double TWO_PI = 2.0 * PI;
 ```
 
-**Estructura Principal:**
+> **Definiciones precisas**: Constantes matemáticas y enumeraciones que definen el comportamiento del sintetizador por nota.
+
+**Estado del Oscilador:**
 ```cpp
-struct Note {
-    // Oscilador
-    double frequency = 440.0;      // Hz
-    double phase = 0.0;            // Fase actual [0, 2π]
-    double phaseInc = 0.0;         // Δphase por sample
-    
-    // Estado
-    bool pressed = false;          // Input del usuario
-    bool alive = false;            // Generando audio
-    
-    // ADSR Envelope
-    EnvStage stage = EnvStage::Idle;
-    double env = 0.0;              // Multiplicador [0,1]
-    double attackSec  = 0.010;     // 10ms attack
-    double decaySec   = 0.060;     // 60ms decay
-    double sustainLvl = 0.70;      // 70% sustain level
-    double releaseSec = 0.120;     // 120ms release
+// Oscilador
+double frequency = 440.0;      // Hz
+double phase = 0.0;            // Fase actual [0, 2π]
+double phaseIncrement = 0.0;   // Δphase por sample
+
+// Estado de la nota
+bool pressed = false;          // Input del usuario
+bool active = false;           // Generando audio
 ```
 
-**Método Principal - nextSample():**
+> **Gestión de estado**: Variables que controlan tanto el oscilador como el estado de vida de cada nota.
+
+**Sistema ADSR Mejorado:**
 ```cpp
-inline double nextSample(double sampleRate) {
-    // 1. Calcular steps de envolvente
-    const double aStep = 1.0 / (attackSec * sampleRate);
-    
-    // 2. State machine ADSR
-    switch (stage) {
-        case EnvStage::Attack:
-            env += aStep;
-            if (env >= 1.0) { env = 1.0; stage = EnvStage::Decay; }
-            break;
-        case EnvStage::Decay:
-            env -= dStep * (1.0 - sustainLvl);
-            if (env <= sustainLvl) { env = sustainLvl; stage = EnvStage::Sustain; }
-            break;
-        // ... Release, Sustain
+// Envelope (ADSR)
+EnvelopeState envelopeState = EnvelopeState::Idle;
+double envelopeLevel = 0.0;
+
+// Timing ajustado para mayor expresividad
+double attackTime = 0.01;      // 10ms - ataque rápido
+double decayTime = 0.06;       // 60ms - decay musical
+double sustainLevel = 0.7;     // 70% - sustain natural
+double releaseTime = 0.15;     // 150ms - release más largo
+```
+
+> **ADSR musical**: Parámetros de envolvente ajustados para sonido más expresivo y natural.
+
+**Generación de Formas de Onda:**
+```cpp
+double generateWaveform() {
+    switch (currentWaveform) {
+        case Waveform::Sine:
+            return std::sin(phase);
+            
+        case Waveform::Square:
+            return (std::sin(phase) >= 0.0) ? 1.0 : -1.0;
+            
+        case Waveform::Triangle: {
+            double t = phase / TWO_PI;
+            return 4.0 * std::abs(t - std::floor(t + 0.5)) - 1.0;
+        }
+        
+        case Waveform::Saw: {
+            double t = phase / TWO_PI;
+            return 2.0 * (t - std::floor(t + 0.5));
+        }
     }
-    
-    // 3. Avanzar oscilador
-    phase += phaseInc;
-    if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
-    
-    // 4. Generar forma de onda
-    switch (wave) {
-        case Waveform::Sine:     x = std::sin(phase); break;
-        case Waveform::Square:   x = (std::sin(phase) >= 0.0 ? 1.0 : -1.0); break;
-        case Waveform::Triangle: /* fórmula matemática */ break;
-        case Waveform::Saw:      /* rampa diente de sierra */ break;
-    }
-    
-    // 5. Normalización RMS (volumen consistente)
-    double g = getRMSGain(wave);              // Factor de corrección
-    
-    // 6. Aplicar envolvente + headroom
-    return amplitude * env * (0.90 * g * x);  // 10% headroom
 }
 ```
 
----
+> **Osciladores matemáticos**: Implementación pura de formas de onda usando funciones matemáticas optimizadas.
 
-#### **`cmake/FetchRtAudioPatched.cmake`**
-
-**Función Principal:**
+**Máquina de Estados ADSR:**
 ```cpp
-function(fetch_rtaudio_patched)
-    // 1. Descargar RtAudio 6.0.1 desde GitHub
-    FetchContent_Populate(rtaudio_direct
-        URL "https://github.com/thestk/rtaudio/archive/refs/tags/6.0.1.zip"
-    )
+void updateEnvelope(double sampleRate) {
+    double stepSize = 1.0 / sampleRate;
     
-    // 2. PARCHE: Arreglar compatibilidad JACK
-    file(READ "${cmake_file}" contents)
-    string(REGEX_REPLACE 
-        "list\\(APPEND LINKLIBS \\$\\{jack_LIBRARIES\\}\\)"      // Patrón original
-        "if(jack_LINK_LIBRARIES)..."                             // Reemplazo condicional
-        contents "${contents}"
-    )
-    file(WRITE "${cmake_file}" "${contents}")
-    
-    // 3. Configurar flags de compilación
-    set(RTAUDIO_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    
-    FetchContent_MakeAvailable(rtaudio)
-endfunction()
+    switch (envelopeState) {
+        case EnvelopeState::Attack:
+            envelopeLevel += stepSize / attackTime;
+            if (envelopeLevel >= 1.0) {
+                envelopeLevel = 1.0;
+                envelopeState = EnvelopeState::Decay;
+            }
+            break;
+        // ... otros estados
+    }
+}
 ```
-**Función**: Descarga RtAudio y aplica un parche para solucionar problemas de linkeo con JACK en sistemas modernos.
+
+> **State machine**: Control preciso de la envolvente ADSR usando una máquina de estados para transiciones suaves.
+
+**Función Principal getSample():**
+```cpp
+double getSample() {
+    if (!active) return 0.0;
+    
+    updateEnvelope(44100.0);              // Actualizar envolvente
+    double waveValue = generateWaveform(); // Generar forma de onda
+    
+    // Avanzar fase del oscilador
+    phase += phaseIncrement;
+    if (phase >= TWO_PI) phase -= TWO_PI;
+    
+    // Aplicar envolvente y amplitud con headroom
+    return amplitude * envelopeLevel * waveValue * 0.8;  // 20% headroom
+}
+```
+
+> **Síntesis completa**: Función que combina oscilación, envolvente y control de amplitud en cada sample.
 
 ---
 
-#### **`CMakeLists.txt`**
+#### **`CMakeLists.txt`** - **SISTEMA DE BUILD MULTIPLATAFORMA**
 
 **Configuración del Proyecto:**
 ```cmake
@@ -612,70 +647,121 @@ cmake_minimum_required(VERSION 3.15)
 project(PianoTiles LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
-# Importar función personalizada de parche
-include(FetchRtAudioPatched)
-
-# Configurar APIs de RtAudio para Linux
-set(RTAUDIO_API_ALSA  ON  CACHE BOOL "" FORCE)    # ALSA support
-set(RTAUDIO_API_PULSE ON  CACHE BOOL "" FORCE)    # PulseAudio support  
-set(RTAUDIO_API_JACK  OFF CACHE BOOL "" FORCE)    # Desactivar JACK
-
-fetch_rtaudio_patched()                            # Descargar + parchar
-```
-
-**Manejo de GLFW:**
-```cmake
-find_package(glfw3 QUIET)                         # Buscar en sistema
-
-if (NOT glfw3_FOUND)                              # Si no existe
-    set(GLFW_BUILD_X11     ON  CACHE BOOL "" FORCE)   # X11 backend
-    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)   # No Wayland
-    set(GLFW_BUILD_EXAMPLES OFF ...)                  # Sin extras
-    
-    FetchContent_Declare(glfw ...)                    # Descargar del source
-    FetchContent_MakeAvailable(glfw)
+# Configuración de build por defecto
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 ```
 
-**Target Final:**
+> **Setup moderno**: CMake 3.15+ con C++17 y configuración Release por defecto para performance óptimo.
+
+**Configuración RtAudio por Plataforma:**
 ```cmake
-add_executable(${PROJECT_NAME}                    # PianoTiles executable
-  src/main.cpp
-  src/VirtualPiano.cpp                           # Note.hpp es header-only
+# APIs específicas por plataforma para latencia óptima
+if(WIN32)
+    set(RTAUDIO_API_WASAPI ON CACHE BOOL "" FORCE)      # Windows: WASAPI
+elseif(APPLE)
+    set(RTAUDIO_API_CORE ON CACHE BOOL "" FORCE)        # macOS: CoreAudio
+else() # Linux
+    set(RTAUDIO_API_PULSE ON CACHE BOOL "" FORCE)       # Linux: PulseAudio preferido
+    set(RTAUDIO_API_ALSA OFF CACHE BOOL "" FORCE)       # ALSA desactivado
+endif()
+
+set(RTAUDIO_API_JACK OFF CACHE BOOL "" FORCE)          # JACK desactivado globalmente
+```
+
+> **Optimización por plataforma**: Selección automática de APIs de audio nativas para cada sistema operativo.
+
+**Gestión Automática de Dependencias:**
+```cmake
+# GLFW: Buscar en sistema, sino descargar
+find_package(glfw3 QUIET)
+if(NOT glfw3_FOUND)
+    message(STATUS "GLFW not found in system, fetching from source")
+    FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.4
+    )
+    FetchContent_MakeAvailable(glfw)
+endif()
+
+# RtAudio: Siempre desde source para control de versión
+FetchContent_Declare(rtaudio
+    GIT_REPOSITORY https://github.com/thestk/rtaudio.git
+    GIT_TAG 6.0.1
+)
+FetchContent_MakeAvailable(rtaudio)
+```
+
+> **Dependencias híbridas**: Sistema inteligente que usa librerías del sistema cuando están disponibles, sino las descarga automáticamente.
+
+**Target y Linkeo Final:**
+```cmake
+add_executable(${PROJECT_NAME}
+    src/main.cpp
+    src/VirtualPiano.cpp
+    # Note.hpp es header-only
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    rtaudio                                      # Audio engine
-    glfw                                         # Windowing + input
-    OpenGL::GL                                   # Graphics
-    Threads::Threads                             # std::mutex support
+    rtaudio                           # Motor de audio
+    ${GLFW_TARGET}                    # Sistema de ventanas
+    OpenGL::GL                        # Renderizado gráfico
+    Threads::Threads                  # Soporte para std::mutex
 )
+
+# Frameworks específicos de macOS
+if(APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE 
+        "-framework Cocoa" "-framework IOKit" "-framework CoreVideo"
+    )
+endif()
 ```
+
+> **Linkeo completo**: Configuración final que enlaza todas las dependencias necesarias con soporte específico para cada plataforma.
 
 ### 🔧 Interacciones Entre Componentes
 
 1. **main.cpp** → crea **VirtualPiano** → llama `initialize()`
-2. **VirtualPiano::initialize()** → setup GLFW + RtAudio + mapeo teclas
-3. **Callback loop**: GLFW events → `keyCallback()` → modifica `activeNotes`
-4. **Audio thread**: RtAudio → `audioCallback()` → lee `activeNotes` → genera audio
-5. **Render loop**: `drawUI()` → lee `activeNotes` + `meterRms/Peak` → OpenGL
-6. **Note objects**: `nextSample()` → ADSR state machine + oscilador → sample output
+2. **VirtualPiano::initialize()** → setup GLFW + RtAudio + mapeo teclas + buffers efectos
+3. **Event loop**: GLFW events → `handleKeyEvent()` → modifica `activeNotes` con mutex
+4. **Audio thread**: RtAudio → `processAudio()` → lee `activeNotes` → genera audio + efectos
+5. **Render loop**: `renderUI()` → lee `activeNotes` + `currentRMS/Peak` → OpenGL
+6. **Note objects**: `getSample()` → ADSR state machine + oscilador → sample output
+7. **Effects chain**: Chorus → dual LFO + delay buffers → espacialización estéreo
 
 ### 📊 Flujo de Datos en Tiempo Real
 
-> Ya habiendo repasado los diferentes componentes del proyecto será más fácil comprender su flujo de datos y cómo trabaja cada interacción.
-
 ```
-[User Keypress] → [GLFW] → [keyCallback] → [activeNotes + mutex] 
-                                               ↓
-[Speakers] ← [RtAudio] ← [audioCallback] ← [Note::nextSample()]
-                                               ↓
-[VU Display] ← [drawMeters] ← [atomic meters] ← [RMS/Peak calc]
+[User Keypress] → [GLFW] → [handleKeyEvent] → [activeNotes + mutex] 
+                                                   ↓
+[Speakers] ← [RtAudio] ← [processAudio] ← [Note::getSample() + Chorus]
+                                                   ↓
+[VU Display] ← [drawVUMeters] ← [currentRMS/Peak] ← [RMS/Peak calc]
 ```
 
 **Puntos Críticos de Sincronización:**
-- `std::mutex mtx`: Protege `activeNotes` entre UI thread y audio thread
-- `std::atomic<float>`: VU meters thread-safe sin bloquear audio
-- Lock-free en audio callback: Solo lee atomics, minimiza `mutex` time
+- `std::mutex notesMutex`: Protege `activeNotes` entre UI thread y audio thread
+- Lock scope mínimo: Solo durante modificación/lectura de notas activas
+- Lock-free VU meters: Variables simples `currentRMS/Peak` sin atomics
+- Chorus buffers: Thread-safe por diseño (solo audio thread los modifica)
 
-### Disfruten de su Piano Virtual 🎹 
+### 📝 Notas de Desarrollo
+
+**Decisiones de Diseño Clave:**
+1. **Header-only Note.hpp**: Permite inlining completo del hot path de síntesis
+2. **Mutex granular**: Un solo mutex para `activeNotes`, resto lock-free
+3. **OpenGL Legacy**: Compatible con hardware más antiguo, fácil debugging
+4. **FetchContent**: Builds reproducibles sin dependencias del sistema
+5. **Platform-specific APIs**: Latencia óptima en cada sistema operativo
+
+**Lecciones Aprendidas:**
+- **Audio thread**: Nunca bloquear, minimizar allocations dinámicas
+- **Visual feedback**: 60 FPS es crucial para percepción de responsividad
+- **Cross-platform**: Cada OS tiene quirks únicos en audio/graphics
+- **Buffer sizing**: Trade-off fundamental latencia vs. estabilidad
+- **User experience**: Controles intuitivos > funcionalidad compleja
+
+### 🎹 ¡Disfruta de tu Piano Virtual Mejorado!
+
+**¡Experimenta con los diferentes waveforms, activa el chorus, y crea tu propia música usando solo tu teclado QWERTY!** 🎵
